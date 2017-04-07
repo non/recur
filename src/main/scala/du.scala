@@ -7,17 +7,9 @@ import java.io.File
 import Morphism._
 
 /**
- * This is a port of this Haskell code to Scala using Cats.
+ * This is a modified port of some Haskell code to Scala using Cats.
  *
  * https://www.reddit.com/r/haskell/comments/cs54i/how_would_you_write_du_in_haskell/c0uvqqo
- *
- * Most of this file is just setting up things we don't currently
- * have:
- *
- * 1. Basic I/O type (Io)
- * 2. Open-recursive filesystem type (Fs) with java.io-based methods
- * 3. Type class instances for Fs (Monad, Traverse, etc.)
- * 4. The actual "du" code.
  */
 
 /**
@@ -32,6 +24,9 @@ import Types._
 
 /**
  * Open-recursive FS type.
+ *
+ * By "open-recursive" we mean that the type doesn't mention itself,
+ * but only a "carrier type" R.
  */
 sealed abstract class Fs[R] {
   def fold[A](f: Path => A, g: (Path, Stream[R]) => A): A =
@@ -43,11 +38,17 @@ sealed abstract class Fs[R] {
 
 object Fs {
 
+  // ADT nodes
+
   case class IsFile[R](p: Path) extends Fs[R]
   case class IsDir[R](p: Path, rs: Stream[R]) extends Fs[R]
 
+  // Useful factories
+
   def file[R](p: Path): Fs[R] = IsFile(p)
   def dir[R](p: Path, rs: Stream[R]): Fs[R] = IsDir(p, rs)
+
+  // General FS utils
 
   def filesize(p: Path): Io[Size] =
     Io(new File(p).length)
@@ -57,6 +58,8 @@ object Fs {
 
   def ls(p: Path): Io[Stream[Path]] =
     Io(Stream(new File(p).listFiles: _*).map(_.getPath))
+
+  // Type class instance
 
   implicit val fsTraverse: Traverse[Fs] =
     new Traverse[Fs] {
@@ -72,9 +75,13 @@ object Fs {
 }
 
 // presentation version, using hylo
+//
+// the .unsafeRun calls are to "escape" the Io monad, since for this
+// presentation we didn't care to represent impure FS actions this
+// way.
+object Du {
 
-object DuNew {
-
+  // step function for getFiles
   val f: Path => Fs[Path] = { p =>
     if (Fs.isdir(p).unsafeRun) Fs.dir(p, Fs.ls(p).unsafeRun)
     else Fs.file(p)
@@ -82,6 +89,7 @@ object DuNew {
   def getFiles(p: Path): Fix[Fs] =
     ana(p)(f)
 
+  // step function for sumFiles
   val g: Fs[Size] => Size = {
     case Fs.IsFile(path) => Fs.filesize(path).unsafeRun
     case Fs.IsDir(_, sizes) => sizes.sum
@@ -89,18 +97,22 @@ object DuNew {
   def sumFiles(outer: Fix[Fs]): Size =
     cata[Fs, Size](outer)(g)
 
+  // get total disk usage for path
   def du(p: Path): Size =
     hylo[Fs, Path, Size](p)(f, g)
 
   def main(args: Array[String]): Unit = {
     val path = if (args.isEmpty) "." else args(0)
-    println(du(path))
+    val bytes = du(path)
+    println(s"path '$path' contains $bytes bytes")
   }
 }
 
 // previous version, implemented in terms of a monad (in this case Io).
-
-object DuOrig {
+//
+// this version only calls .unsafeRun at the "end of the world"
+// (i.e. in main).
+object DuIo {
 
   def hyloM[F[_]: Traverse, M[_]: Monad, A, B](g: A => M[F[A]], f: F[B] => M[B]): A => M[B] =
     (a: A) => g(a).flatMap(_.traverse(hyloM(g, f)).flatMap(f))
